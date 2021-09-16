@@ -1,4 +1,4 @@
-# Metriql Metabase Integration
+# Metriql Metabase Integration (WIP)
 
 Synchronize Metabase datasets from Metriql datasets. The idea is to leverage Metriql datasets in your Metabase workflow without any additional modeling in Metabase.
 
