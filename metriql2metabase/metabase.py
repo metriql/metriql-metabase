@@ -7,7 +7,7 @@ import requests
 from requests import Session
 
 from metriql2metabase.dbt_metabase import MetabaseClient
-from metriql2metabase.models.metabase import MetabaseModel, MetabaseColumn
+from metriql2metabase.models.metabase import MetabaseModel, MetabaseColumn, MetabaseMetric
 
 
 class DatabaseOperation:
@@ -21,9 +21,9 @@ class DatabaseOperation:
             logger.setLevel(logging.DEBUG)
 
     def list_databases(self):
-        return map(lambda database: database.get('name'),
-                   filter(lambda database: database.get('engine') in ['trino', 'presto'],
-                          self.client.api('get', '/api/databases')))
+        return list(map(lambda database: database.get('name'),
+                        filter(lambda database: database.get('engine') in ['trino', 'presto'],
+                               self.client.api('get', '/api/database'))))
 
     def sync(self, database, metadata, sync_skip=False, sync_timeout=None):
 
@@ -49,11 +49,14 @@ class DatabaseOperation:
 
     @staticmethod
     def _convert_dataset(dataset, dimensions, measures):
+        metrics = list(map(lambda v: DatabaseOperation._convert_measure(v[0], v[1][0]), measures.items()))
         return MetabaseModel(dataset.get('name'),
                              dataset.get('category') or "public",
                              dataset.get('description'),
+                             dataset.get('label'),
                              DatabaseOperation._convert_dimensions(dimensions),
-                             list(map(lambda v: DatabaseOperation._convert_measure(v[0], v[1][0]), measures.items())))
+                             metrics,
+                             dataset.get('hidden') or False)
 
     @staticmethod
     def _convert_dimensions(dimensions):
@@ -68,4 +71,4 @@ class DatabaseOperation:
 
     @staticmethod
     def _convert_measure(column_reference, measure):
-        return MetabaseColumn(column_reference)
+        return MetabaseMetric(column_reference)

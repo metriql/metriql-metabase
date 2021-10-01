@@ -175,19 +175,15 @@ class MetabaseClient:
             logging.error("Table %s does not exist in Metabase", lookup_key)
             return
 
-        # Empty strings not accepted by Metabase
-        if not model.description:
-            model_description = None
-        else:
-            model_description = model.description
-
         table_id = api_table["id"]
-        if api_table["description"] != model_description and model_description:
+        compiled = {"description": model.description or None,
+                    'display_name': model.label or None,
+                    "visibility_type": None if model.hidden else "hidden"}
+
+        if self._check_if_subset(compiled, api_table):
             # Update with new values
-            self.api("put", f"/api/table/{table_id}", json={"description": model_description}, )
+            self.api("put", f"/api/table/{table_id}", json=compiled, )
             logging.info("Updated table %s successfully", lookup_key)
-        elif not model_description:
-            logging.info("No model description provided for table %s", lookup_key)
         else:
             logging.info("Table %s is up-to-date", lookup_key)
 
@@ -195,7 +191,7 @@ class MetabaseClient:
             self.export_column(schema_name, model_name, column, field_lookup)
 
         for metric in model.metrics:
-            self.export_column(schema_name, model_name, MetabaseColumn(metric.name, visibility_type="hidden"),
+            self.export_column(schema_name, model_name, MetabaseColumn(metric.name, visibility_type="normal"),
                                field_lookup)
 
     def export_column(
@@ -258,6 +254,7 @@ class MetabaseClient:
                 json={
                     "description": column_description,
                     semantic_type: column.semantic_type,
+                    "display_name": column.label or None,
                     "visibility_type": column.visibility_type,
                     "fk_target_field_id": fk_target_field_id,
                 },
@@ -325,6 +322,31 @@ class MetabaseClient:
 
         return table_lookup, field_lookup
 
+    @staticmethod
+    def _get_metric(metabase_metrics, lookup_key, table_id, metric_name, remove=False):
+        this_metric: MutableMapping = {}
+        for j, existing_metric in enumerate(metabase_metrics):
+            if (
+                    metric_name == existing_metric["name"]
+                    and table_id == existing_metric["table_id"]
+            ):
+                if this_metric:
+                    logging.error("Duplicate metric in model %s", lookup_key)
+                logging.info(
+                    "Existing metric %s found for %s", metric_name, lookup_key
+                )
+                this_metric = existing_metric
+                if remove:
+                    metabase_metrics.pop(j)
+        return this_metric
+
+    @staticmethod
+    def _check_if_subset(subset: dict, subset_list: dict):
+        for key, value in subset.items():
+            if subset_list[key] != value:
+                return False
+        return True
+
     def sync_metrics(
             self,
             database_id: int,
@@ -351,6 +373,10 @@ class MetabaseClient:
 
             for metric in model.metrics:
                 metric_name = metric.name
+                field_id = list(filter(lambda f: f['name'] == metric_name, api_table['fields']))[0]['id']
+
+                this_metric = self._get_metric(metabase_metrics, lookup_key, table_id, metric_name, remove=True)
+
                 metric_description = metric.description or "No description provided"
                 compiled = {
                     "name": metric_name,
@@ -360,24 +386,12 @@ class MetabaseClient:
                         "source-table": table_id,
                         "aggregation": [
                             [
-                                "count",
-                                {"field-id": metric['id']},
+                                "sum",
+                                ["field-id", field_id],
                             ]
                         ],
                     },
                 }
-                this_metric: MutableMapping = {}
-                for j, existing_metric in enumerate(metabase_metrics):
-                    if (
-                            metric_name == existing_metric["name"]
-                            and table_id == existing_metric["table_id"]
-                    ):
-                        if this_metric:
-                            logging.error("Duplicate metric in model %s", lookup_key)
-                        logging.info(
-                            "Existing metric %s found for %s", metric_name, lookup_key
-                        )
-                        this_metric = metabase_metrics.pop(j)
                 if this_metric:
                     # Revise
                     agglomerate_changes = ""
@@ -386,35 +400,28 @@ class MetabaseClient:
                         agglomerate_changes += f'Name changed from {this_metric["name"]} to {compiled["name"]}. '
                     if this_metric["description"] != compiled["description"]:
                         agglomerate_changes += f'Description changed from {this_metric["description"]} to {compiled["description"]}. '
-                    if this_metric["table_id"] != compiled["table_id"]:
-                        agglomerate_changes += f'Table Id changed from {this_metric["table_id"]} to {compiled["table_id"]}. '
                     if this_metric["definition"] != compiled["definition"]:
-                        agglomerate_changes += (
-                            f'Formula definiton updated to {metric["metric"]}'
-                        )
-                    if agglomerate_changes:
-                        compiled["revision_message"] = (
-                                revision_header + agglomerate_changes
-                        )
-                        output_metric = self.api(
-                            "put", f"/api/metric/{this_metric['id']}", json=compiled
-                        )
+                        agglomerate_changes += (f'Formula definition updated')
+
+                    if not self._check_if_subset(compiled, this_metric):
+                        compiled["revision_message"] = (revision_header + agglomerate_changes)
+                        output_metric = self.api("put", f"/api/metric/{this_metric['id']}", json=compiled)
                         logging.info("Metric %s updated!", metric_name)
                         logging.debug(output_metric)
                     else:
                         logging.info("No changes to %s", metric_name)
                 else:
                     # Create metric
-                    output_metric = self.api("post", "/api/metric/", json=compiled)
+                    self.api("post", "/api/metric/", json=compiled)
                     logging.info("Metric %s created!", metric_name)
-                    logging.debug(output_metric)
         for metric in metabase_metrics:
-            output_metric = self.api(
-                "put", f"/api/metric/{metric['id']}",
-                json={"archived": True, "revision_message": "Removed from the Metriql datasets"}
-            )
-            logging.info("Metric `%s` retired because it doesn't exist anymore!", metric['name'])
-            logging.debug(output_metric)
+            if database_id == metric.get('database_id'):
+                output_metric = self.api(
+                    "put", f"/api/metric/{metric['id']}",
+                    json={"archived": True, "revision_message": "Removed from the Metriql datasets or created manually"}
+                )
+                logging.info("Metric `%s` retired because it doesn't exist anymore!", metric['name'])
+                logging.debug(output_metric)
 
     def api(
             self,

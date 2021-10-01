@@ -26,9 +26,6 @@ def main(args: list = None):
 
     parsed = parser.parse_args(args=args)
     operation = DatabaseOperation(parsed.metabase_url, parsed.metabase_username, parsed.metabase_password, parsed.verbose)
-    if parsed.command == "create-database":
-        operation.create_database(parsed.metriql_url, parsed.database_name)
-        print('Successfully created!')
     if parsed.command == "list-databases":
         databases = operation.list_databases()
         print(json.dumps(databases))
