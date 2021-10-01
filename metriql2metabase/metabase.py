@@ -1,38 +1,71 @@
 import json
+import logging
+import sys
+
 from bs4 import BeautifulSoup
 import requests
 from requests import Session
 
+from metriql2metabase.dbt_metabase import MetabaseClient
+from metriql2metabase.models.metabase import MetabaseModel, MetabaseColumn
+
 
 class DatabaseOperation:
-    metabase_url: str
-    session: Session
+    client: MetabaseClient
 
-    def __init__(self, metabase_url, username, password) -> None:
-        self.metabase_url = metabase_url
-
-        # set up session for auth
-        self.session = requests.Session()
+    def __init__(self, metabase_url, username, password, verbose):
+        self.client = MetabaseClient(metabase_url, username, password)
+        if verbose:
+            logger = logging.getLogger()
+            logger.addHandler(logging.StreamHandler(sys.stdout))
+            logger.setLevel(logging.DEBUG)
 
     def list_databases(self):
-        r = self.session.get("{}/METABASE_API_URL".format(self.metabase_url))
+        return map(lambda database: database.get('name'),
+                   filter(lambda database: database.get('engine') in ['trino', 'presto'],
+                          self.client.api('get', '/api/databases')))
 
-        ## example:
-        if r.status_code == 401:
-            raise Exception("Invalid credentials")
-        elif r.status_code == 404:
-            raise Exception("Invalid metabase URL, 404 returned")
-        elif r.status_code != 200:
-            raise Exception("Unable to perform operation: {}".format(r.text))
+    def sync(self, database, metadata, sync_skip=False, sync_timeout=None):
 
-        return list(filter(lambda db: db.get('backend') == 'trino', all_databases))
+        models = list(map(
+            lambda dataset: self._convert_dataset(dataset,
+                                                  metadata.get_dimensions(dataset.get('name')),
+                                                  metadata.get_measures(dataset.get('name'))),
+            metadata.get_datasets()))
 
-    def create_database(self, metriql_url, database_name):
-        pass
+        database_id = self.client.find_database_id(database)
 
-    def sync(self, database_id, metadata):
-        pass
+        if not sync_skip:
+            if sync_timeout is not None and not self.client.sync_and_wait(
+                    database_id,
+                    models,
+                    sync_timeout,
+            ):
+                logging.critical("Sync timeout reached, models still not compatible")
+                return
 
-        ## print something like:
-        print("Successfully synchronized existing {} datasets, created {} datasets".format(
-            len(metriql_datasets) - new_dataset_count, new_dataset_count))
+        self.client.export_models(database_id, models)
+        self.client.sync_metrics(database_id, models)
+
+    @staticmethod
+    def _convert_dataset(dataset, dimensions, measures):
+        return MetabaseModel(dataset.get('name'),
+                             dataset.get('category') or "public",
+                             dataset.get('description'),
+                             DatabaseOperation._convert_dimensions(dimensions),
+                             list(map(lambda v: DatabaseOperation._convert_measure(v[0], v[1][0]), measures.items())))
+
+    @staticmethod
+    def _convert_dimensions(dimensions):
+        columns = []
+        for name, value in dimensions.items():
+            if value[0].get('postOperations') is not None:
+                for post_operation in value[0].get('postOperations'):
+                    columns.append(MetabaseColumn('{}::{}'.format(name, post_operation)))
+            else:
+                columns.append(MetabaseColumn(name))
+        return columns
+
+    @staticmethod
+    def _convert_measure(column_reference, measure):
+        return MetabaseColumn(column_reference)

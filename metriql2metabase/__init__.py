@@ -16,8 +16,8 @@ def main(args: list = None):
     parser.add_argument("--metriql-url", help="metriql URL")
     parser.add_argument("--file", help="Read dataset from file instead of stdin")
 
-    parser.add_argument("--database-id", help="Metabase database id that will be used to synchronize the datasets")
-    parser.add_argument("--database-name", help="Metabase database name that will be used when creating databases")
+    parser.add_argument("--database", help="Metabase database name that will be used when creating databases")
+    parser.add_argument("--verbose", action="store_true", default=False, help="Verbose output",)
 
     parser.add_argument("--metabase-url", help="Metabase URL that you want to analyze metriql data")
 
@@ -25,7 +25,7 @@ def main(args: list = None):
     parser.add_argument("--metabase-password", help="Metabase password for generating API token")
 
     parsed = parser.parse_args(args=args)
-    operation = DatabaseOperation(parsed.metabase_url, parsed.metabase_username, parsed.metabase_password)
+    operation = DatabaseOperation(parsed.metabase_url, parsed.metabase_username, parsed.metabase_password, parsed.verbose)
     if parsed.command == "create-database":
         operation.create_database(parsed.metriql_url, parsed.database_name)
         print('Successfully created!')
@@ -38,6 +38,4 @@ def main(args: list = None):
         else:
             source = sys.stdin.readline()
         metriql_metadata = MetriqlMetadata(parsed.metriql_url, json.loads(source))
-        if parsed.database_id is None:
-            raise Exception("--database-id argument is required")
-        operation.sync(int(parsed.database_id), metriql_metadata)
+        operation.sync(parsed.database, metriql_metadata)
