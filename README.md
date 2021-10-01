@@ -28,7 +28,7 @@ Yes!
 
 #### How is this related to [dbt-metabase](https://github.com/gouline/dbt-metabase)?
 
-While this Python script is heavily influenced by the [dbt-metabase](https://github.com/gouline/dbt-metabase) codebase, 
+While this metriql-metabase is heavily influenced by the [dbt-metabase](https://github.com/gouline/dbt-metabase) codebase, 
 it integrates Metabase with Metriql, not directly to dbt. While you need to maintain Metriql as a separate service here are advantages of Metriql over dbt-metabase:
 
 * You can define the metrics as native SQL
