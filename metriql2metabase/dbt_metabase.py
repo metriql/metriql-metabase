@@ -42,7 +42,7 @@ class MetabaseClient:
             verify {Union[str, bool]} -- Path to certificate or disable verification. (default: {None})
         """
 
-        self.host = host
+        self.host = host.rstrip('/')
         self.verify = verify
         self.session_id = self.get_session_id(user, password)
         self.collections: Iterable = []
@@ -79,7 +79,7 @@ class MetabaseClient:
             timeout: Optional[int],
     ) -> bool:
         if timeout is None:
-            timeout = 30
+            timeout = 60
 
         if timeout < self._SYNC_PERIOD_SECS:
             logging.critical(
@@ -144,11 +144,12 @@ class MetabaseClient:
 
     def export_models(
             self,
-            database_id: int,
+            table_lookup: dict,
+            field_lookup: dict,
             models: Sequence[MetabaseModel],
     ):
-        table_lookup, field_lookup = self.build_metadata_lookups(database_id)
         for model in models:
+            print(model.name)
             self.export_model(model, table_lookup, field_lookup)
 
     def export_model(
@@ -157,14 +158,6 @@ class MetabaseClient:
             table_lookup: dict,
             field_lookup: dict,
     ):
-        """Exports one dbt model to Metabase database schema.
-        Arguments:
-            model {dict} -- One dbt model read from project.
-            table_lookup {dict} -- Dictionary of Metabase tables indexed by name.
-            field_lookup {dict} -- Dictionary of Metabase fields indexed by name, indexed by table name.
-            aliases {dict} -- Provided by reader class. Shuttled down to column exports to resolve FK refs against relations to aliased source tables
-        """
-
         schema_name = model.schema.upper()
         model_name = model.name.upper()
 
@@ -178,9 +171,9 @@ class MetabaseClient:
         table_id = api_table["id"]
         compiled = {"description": model.description or None,
                     'display_name': model.label or None,
-                    "visibility_type": None if model.hidden else "hidden"}
+                    "active": not model.hidden}
 
-        if self._check_if_subset(compiled, api_table):
+        if not self._check_if_subset(compiled, api_table):
             # Update with new values
             self.api("put", f"/api/table/{table_id}", json=compiled, )
             logging.info("Updated table %s successfully", lookup_key)
@@ -191,7 +184,8 @@ class MetabaseClient:
             self.export_column(schema_name, model_name, column, field_lookup)
 
         for metric in model.metrics:
-            self.export_column(schema_name, model_name, MetabaseColumn(metric.name, visibility_type="normal"),
+            self.export_column(schema_name, model_name,
+                               MetabaseColumn(metric.name, metric.description, metric.label or metric.name, None, "hidden"),
                                field_lookup)
 
     def export_column(
@@ -227,38 +221,20 @@ class MetabaseClient:
         else:
             semantic_type = "semantic_type"
 
-        fk_target_field_id = None
         if column.semantic_type == "type/FK":
             raise Exception("semantic_type `type/FK` is not supported.")
 
-        # Nones are not accepted, default to normal
-        if not column.visibility_type:
-            column.visibility_type = "normal"
+        payload = {
+            "description": column.description or None,
+            semantic_type: column.semantic_type,
+            "display_name": column.label or None,
+            "visibility_type": column.visibility_type or "normal",
+            "preview_display": column.visibility_type == "hidden",
+        }
 
-        # Empty strings not accepted by Metabase
-        if not column.description:
-            column_description = None
-        else:
-            column_description = column.description
-
-        if (
-                api_field["description"] != column_description
-                or api_field[semantic_type] != column.semantic_type
-                or api_field["visibility_type"] != column.visibility_type
-                or api_field["fk_target_field_id"] != fk_target_field_id
-        ):
+        if not self._check_if_subset(payload, api_field):
             # Update with new values
-            self.api(
-                "put",
-                f"/api/field/{field_id}",
-                json={
-                    "description": column_description,
-                    semantic_type: column.semantic_type,
-                    "display_name": column.label or None,
-                    "visibility_type": column.visibility_type,
-                    "fk_target_field_id": fk_target_field_id,
-                },
-            )
+            self.api("put", f"/api/field/{field_id}", json=payload)
             logging.info("Updated field %s.%s successfully", model_name, column_name)
         else:
             logging.info("Field %s.%s is up-to-date", model_name, column_name)
@@ -343,18 +319,18 @@ class MetabaseClient:
     @staticmethod
     def _check_if_subset(subset: dict, subset_list: dict):
         for key, value in subset.items():
-            if subset_list[key] != value:
+            if key not in subset_list or subset_list[key] != value:
                 return False
         return True
 
     def sync_metrics(
             self,
-            database_id: int,
+            table_lookup,
+            database_id,
             models: List[MetabaseModel],
             revision_header: str = "Metric has been updated. ",
     ):
         metabase_metrics = self.api("get", "/api/metric")
-        table_lookup, field_lookup = self.build_metadata_lookups(database_id)
 
         for model in models:
             schema_name = model.schema.upper()
@@ -377,10 +353,14 @@ class MetabaseClient:
 
                 this_metric = self._get_metric(metabase_metrics, lookup_key, table_id, metric_name, remove=True)
 
-                metric_description = metric.description or "No description provided"
+                if metric.description and metric.label:
+                    description = metric.label + "\n" + metric.description
+                else:
+                    description = metric.label
+
                 compiled = {
                     "name": metric_name,
-                    "description": metric_description,
+                    "description": description or "No description provided",
                     "table_id": table_id,
                     "definition": {
                         "source-table": table_id,
@@ -392,6 +372,7 @@ class MetabaseClient:
                         ],
                     },
                 }
+
                 if this_metric:
                     # Revise
                     agglomerate_changes = ""
@@ -451,8 +432,9 @@ class MetabaseClient:
         if authenticated:
             headers["X-Metabase-Session"] = self.session_id
 
+        url_path = f"{self.host}{path}"
         response = requests.request(
-            method, f"{self.host}{path}", verify=self.verify, **kwargs
+            method, url_path, verify=self.verify, **kwargs
         )
 
         if critical:
@@ -471,7 +453,10 @@ class MetabaseClient:
         elif not response.ok:
             return {}
 
-        response_json = json.loads(response.text)
+        try:
+            response_json = json.loads(response.text)
+        except:
+            raise Exception("Unable to run API Request on ({}): {}".format(url_path, response.text or '(empty)'))
 
         # Since X.40.0 responses are encapsulated in "data" with pagination parameters
         if "data" in response_json:

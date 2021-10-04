@@ -4,7 +4,7 @@ from .metadata import MetriqlMetadata
 from .metabase import DatabaseOperation
 import sys
 
-__version__ = "0.3"
+__version__ = "0.5"
 
 
 def main(args: list = None):

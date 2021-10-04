@@ -1,10 +1,5 @@
-import json
 import logging
 import sys
-
-from bs4 import BeautifulSoup
-import requests
-from requests import Session
 
 from metriql2metabase.dbt_metabase import MetabaseClient
 from metriql2metabase.models.metabase import MetabaseModel, MetabaseColumn, MetabaseMetric
@@ -21,7 +16,7 @@ class DatabaseOperation:
             logger.setLevel(logging.DEBUG)
 
     def list_databases(self):
-        return list(map(lambda database: database.get('name'),
+        return list(map(lambda database: {"id": database.get('name'), "name": database.get('name')},
                         filter(lambda database: database.get('engine') in ['trino', 'presto'],
                                self.client.api('get', '/api/database'))))
 
@@ -36,7 +31,7 @@ class DatabaseOperation:
         database_id = self.client.find_database_id(database)
 
         if not sync_skip:
-            if sync_timeout is not None and not self.client.sync_and_wait(
+            if not self.client.sync_and_wait(
                     database_id,
                     models,
                     sync_timeout,
@@ -44,8 +39,11 @@ class DatabaseOperation:
                 logging.critical("Sync timeout reached, models still not compatible")
                 return
 
-        self.client.export_models(database_id, models)
-        self.client.sync_metrics(database_id, models)
+        table_lookup, field_lookup = self.client.build_metadata_lookups(database_id)
+
+        self.client.export_models(table_lookup, field_lookup, models)
+        self.client.sync_metrics(table_lookup, database_id, models)
+        print("Successfully synchronized {} datasets".format(len(models)))
 
     @staticmethod
     def _convert_dataset(dataset, dimensions, measures):
@@ -62,13 +60,26 @@ class DatabaseOperation:
     def _convert_dimensions(dimensions):
         columns = []
         for name, value in dimensions.items():
+            description = value[0].get('description')
+            label = value[0].get('label') or value[0].get('name')
+            prefix = (value[1] or {}).get('label') or (value[1] or {}).get('name')
+            if prefix:
+                label = prefix + ' / ' + label
+            semantic_type = value[0].get('report', {}).get('metabase', {}).get('semantic_type')
+            visibility_type = "hidden" if value[0].get('hidden') else None
             if value[0].get('postOperations') is not None:
                 for post_operation in value[0].get('postOperations'):
-                    columns.append(MetabaseColumn('{}::{}'.format(name, post_operation)))
+                    columns.append(
+                        MetabaseColumn('{}::{}'.format(name, post_operation), description,
+                                       '{} ({})'.format(label, post_operation), semantic_type,
+                                       visibility_type))
             else:
-                columns.append(MetabaseColumn(name))
+                columns.append(MetabaseColumn(name, description, label, semantic_type, visibility_type))
         return columns
 
     @staticmethod
     def _convert_measure(column_reference, measure):
-        return MetabaseMetric(column_reference)
+        label = measure.get('label')
+        if not label:
+            label = measure.get('name')
+        return MetabaseMetric(column_reference, label, measure.get('description'))
